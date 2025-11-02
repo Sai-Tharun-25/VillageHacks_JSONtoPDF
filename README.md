@@ -31,3 +31,7 @@ JSON – Structured data input
 OUTPUT_PDF.pdf: https://drive.google.com/file/d/1WS2qftqG7rxd9WavfVYwmKm02SrdIgSy/view?usp=drive_link
 
 BONUS_PDF.pdf: https://drive.google.com/file/d/1mHYTsCE2zb1I2FCGIdb9XpZcUEvWZBiq/view?usp=sharing
+
+Binsr Inspect Challenge – Bonus Report
+Automatically generates a modern, media-rich home inspection PDF (bonus_pdf.pdf) from inspection.json, featuring inline images, clickable table of contents, and color-coded findings.
+Built with Python + ReportLab for speed, clarity, and professional presentation.
