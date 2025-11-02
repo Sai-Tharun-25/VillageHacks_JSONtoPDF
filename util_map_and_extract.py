@@ -4,6 +4,7 @@ import json, re, base64
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional
 
+ALLOW_REMOTE_HTTP = True 
 # Canonical order for output
 ORDERED_MAJOR = [
     "I. STRUCTURAL SYSTEMS",
@@ -102,64 +103,90 @@ def resolve_item(title: str, lookup: dict) -> Optional[Tuple[str,str]]:
             return val
     return None
 
-# ----------- images (no downloads) -----------
-def _maybe_add_local(pathlike: str, out: List[Tuple[str,int,int]]):
-    if not isinstance(pathlike, str): return
-    p = Path(pathlike)
-    if p.exists():
-        out.append((str(p), 0, 0))
+def _collect_images(line_item: dict) -> list[tuple[str, int, int]]:
+    """
+    Return embeddable image file paths (no ReportLab Image objects here).
+    Accepts:
+      - local paths: strings or dict keys: path/imagePath/photoPath/file/filePath/localPath
+      - data-URIs: data:image/...;base64,... under keys: data_uri/dataURI/uri/url/downloadURL (if value startswith 'data:')
+      - http(s) URLs: only if ALLOW_REMOTE_HTTP=True (downloaded to a temp file)
+    Searches both line-item level and comment level: images/photos/attachments/media.
+    """
+    import base64, re, urllib.request, os
+    from pathlib import Path
 
-def _maybe_add_data_uri(data_uri: str, out: List[Tuple[str,int,int]]):
-    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
-        return
+    out: list[tuple[str,int,int]] = []
+    debug: list[str] = []
+
+    def add_local(p: str):
+        if not isinstance(p, str): return
+        if p.startswith("http"):   # handled in add_remote
+            add_remote(p)
+            return
+        path = Path(p)
+        if path.exists():
+            out.append((str(path), 0, 0)); debug.append(f"local:{path}")
+
+    def add_data_uri(s: str):
+        if not isinstance(s, str) or not s.startswith("data:"): return
+        try:
+            head, b64 = s.split(",", 1)
+            ext = ".jpg"
+            if "png" in head: ext = ".png"
+            tmp = Path(f"~img_{abs(hash(s))}{ext}")
+            if not tmp.exists():
+                tmp.write_bytes(base64.b64decode(b64))
+            out.append((str(tmp), 0, 0)); debug.append(f"datauri:{tmp.name}")
+        except Exception:
+            pass
+
+    def add_remote(u: str):
+        if not isinstance(u, str) or not u.startswith(("http://","https://")):
+            return
+        if not ALLOW_REMOTE_HTTP:
+            return  # honor "no downloads"
+        try:
+            ext = os.path.splitext(u.split("?")[0])[-1].lower()
+            if ext not in (".jpg",".jpeg",".png",".gif",".webp"): ext = ".jpg"
+            tmp = Path(f"~img_{abs(hash(u))}{ext}")
+            if not tmp.exists():
+                with urllib.request.urlopen(u, timeout=10) as r:
+                    tmp.write_bytes(r.read())
+            out.append((str(tmp), 0, 0)); debug.append(f"http:{u[:60]}... -> {tmp.name}")
+        except Exception:
+            pass
+
+    def harvest(obj):
+        if isinstance(obj, (list, tuple)):
+            for x in obj: harvest(x); return
+        if isinstance(obj, str):
+            if obj.startswith("data:"): add_data_uri(obj)
+            else: add_local(obj)
+            return
+        if isinstance(obj, dict):
+            for k in ("path","imagePath","photoPath","file","filePath","localPath"):
+                v = obj.get(k)
+                if isinstance(v, str): add_local(v)
+            for k in ("data_uri","dataURI","uri","url","downloadURL"):
+                v = obj.get(k)
+                if isinstance(v, str) and v.startswith("data:"): add_data_uri(v)
+                elif isinstance(v, str) and v.startswith(("http://","https://")): add_remote(v)
+            for k in ("images","photos","attachments","media"):
+                if k in obj: harvest(obj[k])
+
+    harvest(line_item.get("images"))
+    harvest(line_item.get("photos"))
+    harvest(line_item.get("attachments"))
+    for c in (line_item.get("comments") or []):
+        harvest(c.get("images")); harvest(c.get("photos")); harvest(c.get("attachments"))
+
+    # quick debug trail
     try:
-        head, b64 = data_uri.split(",", 1)
-        ext = ".jpg"
-        if "png" in head: ext = ".png"
-        tmp = Path(f"~img_{abs(hash(data_uri))}{ext}")
-        tmp.write_bytes(base64.b64decode(b64))
-        out.append((str(tmp), 0, 0))
+        Path("~images_debug.txt").write_text("\n".join(debug), encoding="utf-8")
     except Exception:
         pass
 
-def _collect_images(line_item: dict) -> List[Tuple[str,int,int]]:
-    """
-    Collect local-embeddable images WITHOUT downloading:
-      - Accept: {path:"..."}, {imagePath:"..."}, {photoPath:"..."}, "data_uri": "data:image/...;base64,..."
-      - Ignore: http(s) URLs (by design)
-      - Works at line-item level and comment level
-    """
-    out: List[Tuple[str,int,int]] = []
-
-    def handle(container):
-        if not container: return
-        for img in container:
-            # direct string path
-            if isinstance(img, str):
-                if img.startswith("http"):  # ignore remote
-                    continue
-                _maybe_add_local(img, out)
-                continue
-            if not isinstance(img, dict):
-                continue
-            # local paths
-            for key in ("path","imagePath","photoPath"):
-                if key in img and isinstance(img[key], str) and not img[key].startswith("http"):
-                    _maybe_add_local(img[key], out)
-            # data URI
-            if "data_uri" in img and isinstance(img["data_uri"], str):
-                _maybe_add_data_uri(img["data_uri"], out)
-
-    # item-level
-    handle(line_item.get("images"))
-    handle(line_item.get("photos"))
-    # comment-level
-    for c in (line_item.get("comments") or []):
-        handle(c.get("images"))
-        handle(c.get("photos"))
-
     return out
-# ---------------------------------------------
 
 def group_items_detailed(data: dict, lookup: dict) -> Dict[str, Dict[str, List[dict]]]:
     """

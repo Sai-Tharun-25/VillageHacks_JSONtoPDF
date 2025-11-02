@@ -21,18 +21,17 @@ from util_map_and_extract import (
 # ---------- page furniture ----------
 
 def _on_page(canvas: Canvas, doc, header: dict):
-    # Footer: "Report Identification: <address> - <date>"
-    address = header.get("address", "")
-    date    = header.get("date", "")
-    footer  = f"Report Identification: {address} - {date}"
+    """
+    Minimal page furniture:
+      - Only a page number at bottom-right.
+    Removes the older 'Report Identification: <addr> - <date>' and the
+    'I=Inspected NI=Not Inspected NP=Not Present D=Deficient' legend.
+    """
     canvas.setFont("Helvetica", 8)
-    canvas.setFillGray(0.3)
-    canvas.drawString(0.75*inch, 0.5*inch, footer)
-
-    # Top right legend "I=Inspected  NI=Not Inspected  NP=Not Present  D=Deficient"
-    legend = "I=Inspected   NI=Not Inspected   NP=Not Present   D=Deficient"
-    w = canvas.stringWidth(legend, "Helvetica", 8)
-    canvas.drawString(doc.pagesize[0] - 0.75*inch - w, doc.pagesize[1] - 0.5*inch, legend)
+    pn = canvas.getPageNumber()
+    pn_text = f"Page {pn}"
+    wpn = canvas.stringWidth(pn_text, "Helvetica", 8)
+    canvas.drawString(doc.pagesize[0] - 0.75*inch - wpn, 0.5*inch, pn_text)
 
     # page number (bottom right)
     pn = canvas.getPageNumber()

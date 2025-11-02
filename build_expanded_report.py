@@ -18,11 +18,16 @@ import re
 from PyPDF2 import PdfReader, PdfWriter
 from PyPDF2.generic import (
     NameObject, BooleanObject, TextStringObject, DictionaryObject,
-    IndirectObject
+    IndirectObject, ArrayObject
 )
+
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
 
 from util_map_and_extract import load_json, extract_header_info
 from flow_layout import build_flow_pdf
+
 
 # --- hardcoded paths ---
 TEMPLATE   = Path("TREC_Template_Blank.pdf")
@@ -38,6 +43,59 @@ def _as_obj(x):
         return x.get_object() if isinstance(x, IndirectObject) else x
     except Exception:
         return x
+
+def _add_front_pages_and_strip_fields(writer: PdfWriter, template_reader: PdfReader, count: int = 2) -> None:
+    """
+    Add the first `count` pages from the blank TREC template, then remove all /Widget annotations
+    so the final report has NO interactive form fields.
+    """
+    n = min(count, len(template_reader.pages))
+    for i in range(n):
+        writer.add_page(template_reader.pages[i])
+
+    # Strip annotations from those front pages (removes all form inputs visually & interactively)
+    for i in range(n):
+        page = writer.pages[i]
+        if "/Annots" in page:
+            page[NameObject("/Annots")] = ArrayObject()
+
+    # Also ensure the doc root has no /AcroForm dictionary
+    if "/AcroForm" in writer._root_object:
+        del writer._root_object["/AcroForm"]
+
+def _fill_page1_by_overlay(writer: PdfWriter, header: dict, tmp_overlay: Path = Path("~p1_overlay.pdf")) -> None:
+    """
+    Draw Name of Client, Date of Inspection, Address, Inspector, TREC #, Sponsor, Sponsor TREC #
+    directly onto Page 1 using a 1-page overlay PDF, then merge it.
+    This avoids all form fields and leaves plain, printable page content.
+    """
+    # 1) Build a 1-page overlay at approximate field locations on the TREC Page 1
+    c = canvas.Canvas(str(tmp_overlay), pagesize=letter)
+    c.setFont("Helvetica", 10)
+
+    # Coordinates tuned for the TREC box layout on Page 1 (letter, portrait)
+    # left column x, right column x (where text should land inside the boxes)
+    xL, xR = 1.25*inch, 4.75*inch
+    # row baselines from top box down (Y decreases downward)
+    y1 = 9.15*inch   # Name of Client / Date of Inspection
+    y2 = 8.60*inch   # Address of Inspected Property
+    y3 = 8.05*inch   # Name of Inspector / TREC License #
+    y4 = 7.50*inch   # Name of Sponsor / TREC License # (sponsor)
+
+    c.drawString(xL, y1, header.get("client",""))
+    c.drawString(xR, y1, header.get("date",""))
+    c.drawString(xL, y2, header.get("address",""))
+    c.drawString(xL, y3, header.get("inspector",""))
+    c.drawString(xR, y3, header.get("trec_license",""))
+    c.drawString(xL, y4, header.get("sponsor",""))
+    c.drawString(xR, y4, header.get("sponsor_license",""))
+
+    c.showPage()
+    c.save()
+
+    # 2) Merge overlay onto Page 1
+    ov = PdfReader(str(tmp_overlay))
+    writer.pages[0].merge_page(ov.pages[0])
 
 def _add_appearances_helv8(writer: PdfWriter, reader: PdfReader):
     root = _as_obj(reader.trailer.get("/Root"))
@@ -160,11 +218,12 @@ def main():
     # 2) Keep official TREC Page 1–2 from the blank template (form fields intact)
     rdr_tpl = PdfReader(str(TEMPLATE))
     wr = PdfWriter()
-    for idx in range(min(2, len(rdr_tpl.pages))):
-        wr.add_page(rdr_tpl.pages[idx])
 
-    _add_appearances_helv8(wr, rdr_tpl)
-    _fill_page1_identity_fuzzy(wr, rdr_tpl, header)  # <-- fills first page robustly
+    # Keep BOTH Page 1 and Page 2; remove all fields so report has no inputs
+    _add_front_pages_and_strip_fields(wr, rdr_tpl, count=2)
+
+    # Draw Page 1 identity values as content (no fields)
+    _fill_page1_by_overlay(wr, header)  # <-- fills first page robustly
 
     # 3) Append flow pages
     rdr_flow = PdfReader(str(FLOW_TMP))
