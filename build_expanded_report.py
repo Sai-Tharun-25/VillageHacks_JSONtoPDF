@@ -24,6 +24,7 @@ from PyPDF2.generic import (
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from util_map_and_extract import load_json, extract_header_info
 from flow_layout import build_flow_pdf
@@ -65,37 +66,48 @@ def _add_front_pages_and_strip_fields(writer: PdfWriter, template_reader: PdfRea
 
 def _fill_page1_by_overlay(writer: PdfWriter, header: dict, tmp_overlay: Path = Path("~p1_overlay.pdf")) -> None:
     """
-    Draw Name of Client, Date of Inspection, Address, Inspector, TREC #, Sponsor, Sponsor TREC #
-    directly onto Page 1 using a 1-page overlay PDF, then merge it.
-    This avoids all form fields and leaves plain, printable page content.
+    Draw Page 1 identity values as page content (no form fields).
+    Tuned baselines + auto-fit so long entries (address) fit inside the TREC boxes.
     """
-    # 1) Build a 1-page overlay at approximate field locations on the TREC Page 1
+
+    
+
     c = canvas.Canvas(str(tmp_overlay), pagesize=letter)
-    c.setFont("Helvetica", 10)
 
-    # Coordinates tuned for the TREC box layout on Page 1 (letter, portrait)
-    # left column x, right column x (where text should land inside the boxes)
-    xL, xR = 1.25*inch, 4.75*inch
-    # row baselines from top box down (Y decreases downward)
-    y1 = 9.15*inch   # Name of Client / Date of Inspection
-    y2 = 8.60*inch   # Address of Inspected Property
-    y3 = 8.05*inch   # Name of Inspector / TREC License #
-    y4 = 7.50*inch   # Name of Sponsor / TREC License # (sponsor)
+    def fit_draw(x: float, y: float, text: str, max_w: float, font="Helvetica", start=10.0, min_size=8.0):
+        t = text or ""
+        size = start
+        while stringWidth(t, font, size) > max_w and size > min_size:
+            size -= 0.5
+        c.setFont(font, size)
+        c.drawString(x, y, t)
 
-    c.drawString(xL, y1, header.get("client",""))
-    c.drawString(xR, y1, header.get("date",""))
-    c.drawString(xL, y2, header.get("address",""))
-    c.drawString(xL, y3, header.get("inspector",""))
-    c.drawString(xR, y3, header.get("trec_license",""))
-    c.drawString(xL, y4, header.get("sponsor",""))
-    c.drawString(xR, y4, header.get("sponsor_license",""))
+    # ---- tuned positions for the TREC Page 1 layout (letter, portrait) ----
+    # left column inside-left; right column inside-left (we're not right-justifying)
+    xL, wL = 0.72*inch, 3.15*inch   # approx width of left column boxes
+    xR, wR = 4.92*inch, 2.25*inch   # approx width of right column boxes
+
+    # baselines lowered ~0.12" from previous to sit mid-box (based on your PDF page 1) :contentReference[oaicite:3]{index=3}
+    y1 = 9.40*inch  # Name of Client / Date of Inspection
+    y2 = 9.08*inch  # Address of Inspected Property
+    y3 = 8.74*inch  # Name of Inspector / TREC License #
+    y4 = 7.40*inch  # Name of Sponsor / TREC License # (sponsor)
+
+    fit_draw(xL, y1, header.get("client",""),           max_w=wL)
+    fit_draw(xR, y1, header.get("date",""),             max_w=wR)
+    fit_draw(xL, y2, header.get("address",""),          max_w=wL)  # address often shrinks to 8–9pt
+    fit_draw(xL, y3, header.get("inspector",""),        max_w=wL)
+    fit_draw(xR, y3, header.get("trec_license",""),     max_w=wR)
+    fit_draw(xL, y4, header.get("sponsor",""),          max_w=wL)
+    fit_draw(xR, y4, header.get("sponsor_license",""),  max_w=wR)
 
     c.showPage()
     c.save()
 
-    # 2) Merge overlay onto Page 1
     ov = PdfReader(str(tmp_overlay))
+    # merge drawn text onto page 1 of the output (no fields involved)
     writer.pages[0].merge_page(ov.pages[0])
+
 
 def _add_appearances_helv8(writer: PdfWriter, reader: PdfReader):
     root = _as_obj(reader.trailer.get("/Root"))
