@@ -111,27 +111,36 @@ class ChecklistLine(Flowable):
 
 def _image_grid(images: List[tuple], max_width: float = 5.5*inch, cols: int = 3):
     """
-    images: list of (local_path, _, _)
-    Returns a reportlab Table that lays images out in a clean grid.
+    images: list of (absolute_path, _, _)
+    Returns a Table that lays images out; silently skips missing files.
     """
+    from pathlib import Path
     if not images:
         return None
+
     cell_w = max_width / cols
     rows, row = [], []
-    for idx, (imgpath, _, _) in enumerate(images):
+    for (imgpath, _, _) in images:
         try:
-            im = Image(imgpath)
-            im._restrictSize(cell_w, 1.7*inch)  # scale to fit grid
+            p = Path(imgpath).expanduser()
+            if not p.is_absolute():
+                p = p.resolve()
+            if not p.exists():
+                continue
+            im = Image(str(p))
+            im._restrictSize(cell_w, 1.7*inch)
             row.append(im)
         except Exception:
             continue
         if len(row) == cols:
             rows.append(row); row = []
     if row:
-        # pad last row
         while len(row) < cols:
             row.append(Spacer(1, 1))
         rows.append(row)
+
+    if not rows:
+        return None
 
     tbl = Table(rows, colWidths=[cell_w]*cols, hAlign='LEFT')
     tbl.setStyle(TableStyle([

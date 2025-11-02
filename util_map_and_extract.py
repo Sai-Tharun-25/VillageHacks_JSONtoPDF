@@ -3,6 +3,12 @@ from pathlib import Path
 import json, re, base64
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+
+BASE_DIR    = Path(__file__).resolve().parent
+ASSETS_DIR  = BASE_DIR / "report_assets"
+IMAGES_DIR  = ASSETS_DIR / "images"
+IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOW_REMOTE_HTTP = True 
 # Canonical order for output
@@ -103,90 +109,250 @@ def resolve_item(title: str, lookup: dict) -> Optional[Tuple[str,str]]:
             return val
     return None
 
+# def _collect_images(line_item: dict) -> list[tuple[str, int, int]]:
+#     """
+#     Save embeddable images to report_assets/images and return their saved paths.
+#     Accepts:
+#       - local paths (string or dict: path/imagePath/photoPath/file/filePath/localPath)
+#       - data-URIs (dict: data_uri/dataURI/uri/url/downloadURL when value startswith 'data:')
+#     Remote http(s) URLs remain ignored (no downloads).
+#     """
+#     import base64, hashlib, os, re
+#     from pathlib import Path
+
+#     def _save_bytes_to_images_dir(content: bytes, ext: str, key: str) -> str:
+#         h = hashlib.sha1(content).hexdigest()[:12]
+#         fname = f"{key}_{h}{ext}"
+#         dest = IMAGES_DIR / fname
+#         if not dest.exists():
+#             dest.write_bytes(content)
+#         return str(dest)
+
+#     def _copy_local(p: str) -> str | None:
+#         if not isinstance(p, str) or p.startswith("http"):
+#             return None  # no downloads
+#         src = Path(p)
+#         if not src.exists():
+#             return None
+#         try:
+#             data = src.read_bytes()
+#             ext  = src.suffix.lower() or ".jpg"
+#             return _save_bytes_to_images_dir(data, ext, "local")
+#         except Exception:
+#             return None
+
+#     def _save_data_uri(s: str) -> str | None:
+#         if not (isinstance(s, str) and s.startswith("data:")):
+#             return None
+#         try:
+#             head, b64 = s.split(",", 1)
+#             ext = ".jpg"
+#             if "png" in head: ext = ".png"
+#             if "webp" in head: ext = ".webp"
+#             data = base64.b64decode(b64)
+#             return _save_bytes_to_images_dir(data, ext, "datauri")
+#         except Exception:
+#             return None
+
+#     out: list[tuple[str, int, int]] = []
+#     debug_lines: list[str] = []
+
+#     def harvest(obj):
+#         if isinstance(obj, (list, tuple)):
+#             for x in obj:
+#                 harvest(x)
+#             return
+#         if isinstance(obj, str):
+#             # direct string path or data-uri
+#             saved = _save_data_uri(obj) if obj.startswith("data:") else _copy_local(obj)
+#             if saved:
+#                 out.append((saved, 0, 0)); debug_lines.append(f"saved:{saved}")
+#             return
+#         if isinstance(obj, dict):
+#             # local-ish keys
+#             for k in ("path","imagePath","photoPath","file","filePath","localPath"):
+#                 v = obj.get(k)
+#                 if isinstance(v, str):
+#                     saved = _copy_local(v)
+#                     if saved:
+#                         out.append((saved, 0, 0)); debug_lines.append(f"local:{v} -> {saved}")
+#             # data-uri under url-ish keys
+#             for k in ("data_uri","dataURI","uri","url","downloadURL"):
+#                 v = obj.get(k)
+#                 if isinstance(v, str) and v.startswith("data:"):
+#                     saved = _save_data_uri(v)
+#                     if saved:
+#                         out.append((saved, 0, 0)); debug_lines.append(f"data_uri -> {saved}")
+#             # nested lists
+#             for k in ("images","photos","attachments","media"):
+#                 if k in obj:
+#                     harvest(obj[k])
+
+#     # line-item level
+#     harvest(line_item.get("images"))
+#     harvest(line_item.get("photos"))
+#     harvest(line_item.get("attachments"))
+#     # comment level
+#     for c in (line_item.get("comments") or []):
+#         harvest(c.get("images")); harvest(c.get("photos")); harvest(c.get("attachments"))
+
+#     # optional manifest (helps verify what saved)
+#     try:
+#         (IMAGES_DIR / "_manifest.txt").write_text("\n".join(debug_lines), encoding="utf-8")
+#     except Exception as E:
+#         print("Failed to write image manifest:", E)
+#         pass
+
+#     return out
+
 def _collect_images(line_item: dict) -> list[tuple[str, int, int]]:
     """
-    Return embeddable image file paths (no ReportLab Image objects here).
+    Save embeddable images under report_assets/images/ and return ABSOLUTE paths.
     Accepts:
-      - local paths: strings or dict keys: path/imagePath/photoPath/file/filePath/localPath
-      - data-URIs: data:image/...;base64,... under keys: data_uri/dataURI/uri/url/downloadURL (if value startswith 'data:')
-      - http(s) URLs: only if ALLOW_REMOTE_HTTP=True (downloaded to a temp file)
-    Searches both line-item level and comment level: images/photos/attachments/media.
+      - local paths (string or dict: path/imagePath/photoPath/file/filePath/localPath)
+      - data-URIs (dict: data_uri/dataURI/uri/url/downloadURL that start with 'data:')
+      - http(s) URLs only if ALLOW_REMOTE_HTTP=True (downloaded into IMAGES_DIR)
+    Searches line-item level and comment level: images/photos/attachments/media.
     """
-    import base64, re, urllib.request, os
+    import base64, hashlib, os, re, urllib.request
     from pathlib import Path
 
-    out: list[tuple[str,int,int]] = []
-    debug: list[str] = []
+    def _save_bytes(content: bytes, ext: str, tag: str) -> str:
+        # content-hashed filename to dedupe
+        h = hashlib.sha1(content).hexdigest()[:12]
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        dest = IMAGES_DIR / f"{tag}_{h}{ext.lower() or '.jpg'}"
+        if not dest.exists():
+            dest.write_bytes(content)
+        return str(dest.resolve())  # absolute
 
-    def add_local(p: str):
-        if not isinstance(p, str): return
-        if p.startswith("http"):   # handled in add_remote
-            add_remote(p)
-            return
-        path = Path(p)
-        if path.exists():
-            out.append((str(path), 0, 0)); debug.append(f"local:{path}")
+    def _resolve_local_candidate(p: str) -> Path | None:
+        """Try BASE_DIR first, then CWD, then absolute if already absolute."""
+        cand = Path(p).expanduser()
+        candidates = []
+        if cand.is_absolute():
+            candidates.append(cand)
+        else:
+            candidates.append((BASE_DIR / cand).resolve())
+            candidates.append((Path.cwd() / cand).resolve())
+        for c in candidates:
+            if c.exists() and c.is_file():
+                return c
+        return None
 
-    def add_data_uri(s: str):
-        if not isinstance(s, str) or not s.startswith("data:"): return
+    def _copy_local(p: str) -> str | None:
+        if not isinstance(p, str) or p.lower().startswith(("http://","https://")):
+            return None
+        src = _resolve_local_candidate(p)
+        if not src:
+            return None
+        try:
+            # if it's already in our destination tree, reuse it
+            if IMAGES_DIR in src.parents:
+                return str(src.resolve())
+            data = src.read_bytes()
+            ext  = src.suffix or ".jpg"
+            return _save_bytes(data, ext, "local")
+        except Exception:
+            return None
+
+    def _save_data_uri(s: str) -> str | None:
+        if not (isinstance(s, str) and s.startswith("data:")):
+            return None
         try:
             head, b64 = s.split(",", 1)
             ext = ".jpg"
-            if "png" in head: ext = ".png"
-            tmp = Path(f"~img_{abs(hash(s))}{ext}")
-            if not tmp.exists():
-                tmp.write_bytes(base64.b64decode(b64))
-            out.append((str(tmp), 0, 0)); debug.append(f"datauri:{tmp.name}")
+            if "png" in head.lower():  ext = ".png"
+            if "webp" in head.lower(): ext = ".webp"
+            data = base64.b64decode(b64)
+            return _save_bytes(data, ext, "datauri")
         except Exception:
-            pass
+            return None
 
-    def add_remote(u: str):
-        if not isinstance(u, str) or not u.startswith(("http://","https://")):
-            return
+    def _download_remote(u: str) -> str | None:
+        if not (isinstance(u, str) and u.lower().startswith(("http://","https://"))):
+            return None
         if not ALLOW_REMOTE_HTTP:
-            return  # honor "no downloads"
+            manifest.append(f"skip_remote(disabled): {u}")
+            return None
         try:
-            ext = os.path.splitext(u.split("?")[0])[-1].lower()
-            if ext not in (".jpg",".jpeg",".png",".gif",".webp"): ext = ".jpg"
-            tmp = Path(f"~img_{abs(hash(u))}{ext}")
-            if not tmp.exists():
-                with urllib.request.urlopen(u, timeout=10) as r:
-                    tmp.write_bytes(r.read())
-            out.append((str(tmp), 0, 0)); debug.append(f"http:{u[:60]}... -> {tmp.name}")
-        except Exception:
-            pass
+            # pick a reasonable ext; default jpg
+            ext = os.path.splitext(u.split("?",1)[0])[1].lower()
+            if ext not in (".jpg",".jpeg",".png",".gif",".webp"):
+                ext = ".jpg"
+            # basic fetch with timeout
+            req = urllib.request.Request(u, headers={"User-Agent": "TREC-Report/1.0"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = r.read()
+            path = _save_bytes(data, ext, "remote")
+            manifest.append(f"remote:{u[:80]} -> {Path(path).name}")
+            return path
+        except Exception as e:
+            manifest.append(f"remote_error: {u[:80]} -> {e}")
+            return None
+
+    out: list[tuple[str, int, int]] = []
+    manifest: list[str] = []
 
     def harvest(obj):
         if isinstance(obj, (list, tuple)):
-            for x in obj: harvest(x); return
-        if isinstance(obj, str):
-            if obj.startswith("data:"): add_data_uri(obj)
-            else: add_local(obj)
+            for x in obj:
+                harvest(x)
             return
+
+        if isinstance(obj, str):
+            # direct string: try data-URI, then local, then remote
+            saved = (_save_data_uri(obj) or
+                     _copy_local(obj) or
+                     _download_remote(obj))
+            if saved:
+                out.append((saved, 0, 0)); manifest.append(f"saved:{saved}")
+            else:
+                manifest.append(f"skipped:{obj[:80]}")
+            return
+
         if isinstance(obj, dict):
+            # Local-ish keys
             for k in ("path","imagePath","photoPath","file","filePath","localPath"):
                 v = obj.get(k)
-                if isinstance(v, str): add_local(v)
-            for k in ("data_uri","dataURI","uri","url","downloadURL"):
+                if isinstance(v, str):
+                    saved = _copy_local(v)
+                    if saved:
+                        out.append((saved, 0, 0)); manifest.append(f"local:{v} -> {saved}")
+            # URL-ish keys (data-URI or http)
+            for k in ("data_uri","dataURI","uri","url","downloadURL","publicUrl","publicURL","signedUrl","signedURL"):
                 v = obj.get(k)
-                if isinstance(v, str) and v.startswith("data:"): add_data_uri(v)
-                elif isinstance(v, str) and v.startswith(("http://","https://")): add_remote(v)
+                if isinstance(v, str):
+                    saved = _save_data_uri(v) or _download_remote(v)
+                    if saved:
+                        out.append((saved, 0, 0)); manifest.append(f"url:{k} -> {Path(saved).name}")
+                    else:
+                        manifest.append(f"skip_url:{k} {v[:80]}")
+            # Nested containers
             for k in ("images","photos","attachments","media"):
-                if k in obj: harvest(obj[k])
+                if k in obj:
+                    harvest(obj[k])
 
+    # line-item level
     harvest(line_item.get("images"))
     harvest(line_item.get("photos"))
     harvest(line_item.get("attachments"))
+    # comment level
     for c in (line_item.get("comments") or []):
-        harvest(c.get("images")); harvest(c.get("photos")); harvest(c.get("attachments"))
+        harvest(c.get("images"))
+        harvest(c.get("photos"))
+        harvest(c.get("attachments"))
 
-    # quick debug trail
+    # write manifest for troubleshooting
     try:
-        Path("~images_debug.txt").write_text("\n".join(debug), encoding="utf-8")
+        (IMAGES_DIR / "_manifest.txt").write_text("\n".join(manifest), encoding="utf-8")
     except Exception:
         pass
 
     return out
+
+
 
 def group_items_detailed(data: dict, lookup: dict) -> Dict[str, Dict[str, List[dict]]]:
     """
